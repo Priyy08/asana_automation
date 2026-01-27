@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+polling_config.json
+.env
+venv/
+.vscode/
