@@ -9,6 +9,7 @@ import asyncio
 import asyncio
 import json
 import os
+import time
 from fastapi.concurrency import run_in_threadpool
 
 CONFIG_FILE = "polling_config.json"
@@ -137,7 +138,7 @@ async def parse_excel(file: UploadFile = File(...)):
             
             tasks_data.append({
                 "name": str(task_name).strip(),
-                "duration": 1, # Default, can be enhanced
+                "duration": 0, # Default to 0 (Same Day)
                 "triggering_tasks": triggers,
                 "lag_days": lags
             })
@@ -226,6 +227,7 @@ async def sync_asana(request: SyncRequest):
         if gid:
             manager.task_registry[t.name] = gid
             created_count += 1
+        time.sleep(0.2) # Prevent Rate Limiting
             
     # 2. Link Dependencies
     linked_count = 0
@@ -240,6 +242,7 @@ async def sync_asana(request: SyncRequest):
             if pred_gid:
                 manager.link_dependency(suc_gid, pred_gid)
                 linked_count += 1
+                time.sleep(0.3) # Prevent Rate Limiting
                 
     return {"status": "success", "created": created_count, "linked": linked_count}
 

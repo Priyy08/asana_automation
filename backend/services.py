@@ -16,8 +16,8 @@ class Scheduler:
             self.tasks[name] = {
                 'name': name,
                 'start_date': datetime.now(),  # Tentative Start (Today)
-                'duration': 1,  # Default
-                'end_date': datetime.now() + timedelta(days=1),
+                'duration': 0,  # Default to 0 (Same day)
+                'end_date': datetime.now(), # Start + 0
                 'gid': None
             }
 
@@ -30,6 +30,7 @@ class Scheduler:
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         for t in self.tasks.values():
             t['start_date'] = today
+            # Delta Math: End = Start + Duration
             t['end_date'] = today + timedelta(days=t['duration'])
 
         # 2. Relax edges

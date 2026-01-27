@@ -40,13 +40,12 @@ def recalculate_dates(tasks: List[ScheduledTask], changed_task_gid: str, new_end
         # Update the task
         if isinstance(changed_task, dict):
             changed_task['due_on'] = new_end_date_str
-            # Assuming duration stays same, update start? Or keep start and change duration?
-            # Requirement: "moving dates... change the end date... dependent tasks must be shifted"
-            # This implies the task itself moves, or extends. 
-            # Usually if I move end date, I might mean "it takes longer" or "it happens later".
-            # Let's assume "It happens later" -> shift entire task.
-            duration = (old_end - datetime.strptime(changed_task['start_on'], "%Y-%m-%d")).days
-            if duration < 1: duration = 1
+            changed_task['due_on'] = new_end_date_str
+            # Calculate duration (Delta)
+            # Duration = (End - Start).days
+            duration = (new_end - datetime.strptime(changed_task['start_on'], "%Y-%m-%d")).days
+            
+            # Update start based on kept duration
             new_start = new_end - timedelta(days=duration)
             changed_task['start_on'] = new_start.strftime("%Y-%m-%d")
         else:
@@ -170,8 +169,8 @@ def auto_recalibrate(tasks: List[dict]) -> List[dict]:
         try:
             current_start = datetime.strptime(task['start_on'], "%Y-%m-%d")
             current_due = datetime.strptime(task['due_on'], "%Y-%m-%d")
+            # Delta Duration
             duration = (current_due - current_start).days
-            if duration < 1: duration = 1 
             
             # Find max predecessor end date
             max_pred_end = None
@@ -185,7 +184,6 @@ def auto_recalibrate(tasks: List[dict]) -> List[dict]:
                     max_pred_end = pred_due
             
             # Check Violation or Gap: Start != Max Pred End
-            # Constraint: Task should start EXACTLY when ALL preds are done (Zero Lag / "Right After").
             if max_pred_end and current_start != max_pred_end:
                 # Needs Shift (Push OR Pull)
                 new_start = max_pred_end
