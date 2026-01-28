@@ -5,6 +5,14 @@ import collections
 from typing import List, Dict, Optional
 from .models import ScheduledTask, AsanaConfig
 
+def add_business_days(from_date: datetime, days_to_add: int) -> datetime:
+    current = from_date
+    while days_to_add > 0:
+        current += timedelta(days=1)
+        if current.weekday() < 5: # Mon-Fri
+            days_to_add -= 1
+    return current
+
 class Scheduler:
     def __init__(self):
         self.tasks = {}  # Name -> TaskData
@@ -30,8 +38,16 @@ class Scheduler:
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         for t in self.tasks.values():
             t['start_date'] = today
-            # Delta Math: End = Start + Duration
-            t['end_date'] = today + timedelta(days=t['duration'])
+            # Workday Logic:
+            # Duration 1 -> Inclusive End = Start + (1-1) = Start (if start is workday)
+            # Duration N -> End = Start + (N-1) workdays
+            
+            # Snap start to workday if needed (though tentative start is today)
+            while t['start_date'].weekday() >= 5:
+                 t['start_date'] += timedelta(days=1)
+                 
+            d = max(1, t['duration'])
+            t['end_date'] = add_business_days(t['start_date'], d - 1)
 
         # 2. Relax edges
         changed = True
@@ -56,7 +72,45 @@ class Scheduler:
 
                 if max_pred_finish > task['start_date']:
                     task['start_date'] = max_pred_finish
-                    task['end_date'] = task['start_date'] + timedelta(days=task['duration'])
+                    task['start_date'] = max_pred_finish
+                    
+                    # Ensure start is a workday (if dependency finished Friday, Start could be Sat? No, skip to Mon)
+                    # "Right After" -> If Pred End = Fri. Next Work Day is Mon? 
+                    # OR if we want "Zero Lag", does it mean Same Day? 
+                    # User said "count Thurs and Fri as 2 days". Implies Inclusive.
+                    # Asana dependencies usually imply Start AFTER Pred Finish.
+                    # If Pred Finish Friday. 
+                    # Options: Start Friday (Overlap) or Start Monday.
+                    # Let's assuming "Sequential" -> Start Monday.
+                    
+                    # BUT Current Logic was `candidate_start = pred_end + lag`.
+                    # If lag=0. Start = Pred End.
+                    # If Pred End = Fri. Start = Fri.
+                    # Workday Logic: Start Fri.
+                    # End = AddBiz(Fri, Dur-1).
+                    
+                    # Wait, if Pred End is Fri. It means it finishes at end of Friday.
+                    # So Successor should start Monday? 
+                    # "Start date of dependent task must shift... ensuring started right after"
+                    # If I finish work Friday 5pm. Next work starts Monday 9am.
+                    # So Start should be Next Workday after Pred End.
+                    
+                    # Let's modify Candidate Start logic (Line 53) directly? 
+                    # No, let's keep it simple first: Start = Max Pred Finish.
+                    # If Max Pred Finish is Fri. Start = Fri.
+                    # If Duration 1. End = Fri.
+                    # This implies they happen on SAME DAY.
+                    # If user implies "Sequential", then Start should be Next Workday?
+                    # "dependent task start date must be 31st Jan only" (when prev ended 29th + 2 days gap?)
+                    # Let's stick to "Start = End" (Same Day Handoff) for 0-lag.
+                    # Because user complained about "0 days" task being Same Day Start/End.
+                    
+                    # Only adjustment: If Start falls on Weekend, move to Monday.
+                    while task['start_date'].weekday() >= 5:
+                        task['start_date'] += timedelta(days=1)
+                        
+                    d = max(1, task['duration'])
+                    task['end_date'] = add_business_days(task['start_date'], d - 1)
                     changed = True
         return iterations
     

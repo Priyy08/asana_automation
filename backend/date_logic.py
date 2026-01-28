@@ -2,6 +2,36 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Set
 from .models import ScheduledTask
 
+def add_business_days(from_date: datetime, days_to_add: int) -> datetime:
+    current = from_date
+    while days_to_add > 0:
+        current += timedelta(days=1)
+        if current.weekday() < 5: # Mon-Fri
+            days_to_add -= 1
+    return current
+
+def count_business_days(start: datetime, end: datetime) -> int:
+    # Inclusive count
+    days = 0
+    curr = start
+    while curr <= end:
+        if curr.weekday() < 5:
+            days += 1
+        curr += timedelta(days=1)
+    return days
+
+def subtract_business_days_offset(end_date: datetime, business_days_needed: int) -> datetime:
+    # Find Start such that AddBiz(Start, days-1) = End
+    # Simplified: Walk backwards 'business_days_needed - 1' steps
+    count = business_days_needed - 1
+    curr = end_date
+    while count > 0:
+        curr -= timedelta(days=1)
+        if curr.weekday() < 5:
+            count -= 1
+    return curr
+
+
 def recalculate_dates(tasks: List[ScheduledTask], changed_task_gid: str, new_end_date_str: str) -> List[ScheduledTask]:
     """
     Recalculates dates for all tasks based on a change in one task's end date.
@@ -41,13 +71,37 @@ def recalculate_dates(tasks: List[ScheduledTask], changed_task_gid: str, new_end
         if isinstance(changed_task, dict):
             changed_task['due_on'] = new_end_date_str
             changed_task['due_on'] = new_end_date_str
-            # Calculate duration (Delta)
-            # Duration = (End - Start).days
-            duration = (new_end - datetime.strptime(changed_task['start_on'], "%Y-%m-%d")).days
             
-            # Update start based on kept duration
-            new_start = new_end - timedelta(days=duration)
-            changed_task['start_on'] = new_start.strftime("%Y-%m-%d")
+            # Calculate duration (Inclusive Workdays)
+            old_start = datetime.strptime(changed_task['start_on'], "%Y-%m-%d")
+            
+            # If new end < old start, we need to respect physics or just shift start?
+            # User wants "shift" usually.
+            # Let's recalculate Duration based on OLD relationship if possible, OR just count current days?
+            # "reduce the deadline by 2 days ... dependent task shift".
+            # This implies the task duration GETS SHORTENED? Or just moved?
+            # "reduce days to complete" -> Shorter Duration.
+            # "move to 31st Jan" -> Move End Date.
+            # If I Just move End Date, do I keep Start Date? 
+            # If "reduce days to complete", then Duration changes. Start stays same.
+            
+            # Recalculate Duration:
+            new_duration = count_business_days(old_start, new_end)
+            if new_duration < 1: new_duration = 1
+            
+            # We DONT shift start here. We updated End. Duration changed.
+            # Start stays same (unless end < start, handled by duration >= 1 imply end>=start).
+            
+            # Wait, if user MOVES the task (drag and drop), Start AND End might move.
+            # But here we only get `new_end_date`.
+            # If user dragged whole task, Start also changed in Asana.
+            # But our polling sees "Task Changed" -> auto_recalibrate.
+            # This function `recalculate_dates` is for the MANUAL endpoint.
+            # If User uses Endpoint "Update Task Date", they provide New End.
+            # Usually implies "Deadline Extended/Shortened". Start constant.
+            
+            pass # Start remains same. Logic handles dependencies below.
+            
         else:
              # Pydantic/Object
              # Note: ScheduledTask uses 'start_date', Asana uses 'start_on'. normalizing...
@@ -169,8 +223,11 @@ def auto_recalibrate(tasks: List[dict]) -> List[dict]:
         try:
             current_start = datetime.strptime(task['start_on'], "%Y-%m-%d")
             current_due = datetime.strptime(task['due_on'], "%Y-%m-%d")
-            # Delta Duration
-            duration = (current_due - current_start).days
+            current_start = datetime.strptime(task['start_on'], "%Y-%m-%d")
+            current_due = datetime.strptime(task['due_on'], "%Y-%m-%d")
+            # Workday Duration
+            duration = count_business_days(current_start, current_due)
+            if duration < 1: duration = 1
             
             # Find max predecessor end date
             max_pred_end = None
@@ -187,7 +244,12 @@ def auto_recalibrate(tasks: List[dict]) -> List[dict]:
             if max_pred_end and current_start != max_pred_end:
                 # Needs Shift (Push OR Pull)
                 new_start = max_pred_end
-                new_due = new_start + timedelta(days=duration)
+                
+                # Check weakend snap
+                while new_start.weekday() >= 5:
+                    new_start += timedelta(days=1)
+                    
+                new_due = add_business_days(new_start, duration - 1)
                 
                 # Update
                 task['start_on'] = new_start.strftime("%Y-%m-%d")
