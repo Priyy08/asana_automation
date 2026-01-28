@@ -5,6 +5,7 @@ import io
 from .models import ScheduleRequest, ScheduledTask, SyncRequest, DateUpdateRequest, AsanaConfig
 from .services import Scheduler, AsanaManager
 from .date_logic import recalculate_dates, auto_recalibrate
+from .database import init_db, save_baseline, update_actuals, get_all_history
 import asyncio
 import asyncio
 import json
@@ -56,6 +57,14 @@ async def background_poller():
                 # auto_recalibrate returns ONLY modified tasks
                 updates = auto_recalibrate(tasks)
                 
+                # Update DB with current state (Actuals)
+                # Pass ALL tasks to update_actuals to ensure we capture everything, 
+                # or just do it periodically? Doing it every poll is fine for <100 tasks.
+                try:
+                    await run_in_threadpool(update_actuals, tasks)
+                except Exception as db_e:
+                    print(f"DB Update Failed: {db_e}")
+
                 # 3. Push Updates
                 if updates:
                     print(f"[Auto-Sync] Violation Detected! Updating {len(updates)} tasks...")
@@ -73,6 +82,7 @@ async def background_poller():
 
 @app.on_event("startup")
 async def startup_event():
+    init_db()
     load_config()
     # Force auto-enable if credentials exist
     if polling_config["pat"] and polling_config["project_gid"]:
@@ -228,7 +238,27 @@ async def sync_asana(request: SyncRequest):
             manager.task_registry[t.name] = gid
             created_count += 1
         time.sleep(0.2) # Prevent Rate Limiting
-            
+    
+    # Save Baseline to DB
+    # We need to construct the list of tasks with GIDs and Dates
+    # The 'request.tasks' has names and initial dates. 'manager.task_registry' has GIDs.
+    
+    baseline_tasks = []
+    for t in request.tasks:
+        gid = manager.task_registry.get(t.name)
+        if gid:
+            baseline_tasks.append({
+                'gid': gid,
+                'name': t.name,
+                'start_on': t.start_date,
+                'due_on': t.end_date
+            })
+    
+    try:
+        await run_in_threadpool(save_baseline, baseline_tasks)
+    except Exception as e:
+        print(f"Failed to save baseline: {e}")
+
     # 2. Link Dependencies
     linked_count = 0
     for t in request.tasks:
@@ -275,6 +305,20 @@ async def visualize(pat: str, project_gid: str):
     manager = AsanaManager(pat, project_gid)
     try:
         tasks = manager.fetch_project_tasks()
+        
+        # Enrich with Expected Dates from DB
+        history = get_all_history()
+        
+        for t in tasks:
+            gid = t['gid']
+            if gid in history:
+                t['expected_start'] = history[gid]['expected_start']
+                t['expected_end'] = history[gid]['expected_end']
+            else:
+                 # Fallback if not in DB (new task?)
+                 t['expected_start'] = t['start_on']
+                 t['expected_end'] = t['due_on']
+                 
         return tasks
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
