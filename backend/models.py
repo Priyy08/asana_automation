@@ -7,6 +7,7 @@ class TaskModel(BaseModel):
     duration: int = 1
     triggering_tasks: List[str] = []
     lag_days: List[int] = []
+    section: Optional[str] = None
 
 class ScheduleRequest(BaseModel):
     tasks: List[TaskModel]
@@ -21,6 +22,7 @@ class ScheduledTask(BaseModel):
     end_date: str
     duration: int
     dependencies: List[str]
+    section: Optional[str] = None
 
 class SyncRequest(BaseModel):
     config: AsanaConfig

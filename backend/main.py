@@ -7,10 +7,10 @@ from .services import Scheduler, AsanaManager
 from .date_logic import recalculate_dates, auto_recalibrate
 from .database import init_db, save_baseline, update_actuals, get_all_history
 import asyncio
-import asyncio
 import json
 import os
 import time
+import openpyxl
 from fastapi.concurrency import run_in_threadpool
 
 CONFIG_FILE = "polling_config.json"
@@ -115,47 +115,92 @@ async def get_polling_status():
 @app.post("/parse-excel")
 async def parse_excel(file: UploadFile = File(...)):
     if not file.filename.endswith('.xlsx'):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload an Excel file.")
+        raise HTTPException(status_code=400, detail="Invalid file format")
     
     contents = await file.read()
     try:
-        df = pd.read_excel(io.BytesIO(contents), header=2)
-        # Basic cleaning
-        df.columns = df.columns.astype(str).str.strip()
+        # Use openpyxl to detect styles (Bold = Section)
+        wb = openpyxl.load_workbook(io.BytesIO(contents), data_only=True)
+        sheet = wb.active
         
         tasks_data = []
-        for index, row in df.iterrows():
-            task_name = row.get('Task')
-            if pd.isna(task_name) or str(task_name).strip() in ['', 'Task']: continue
+        current_section = "General"
+        
+        col_map = {} # 'Task': idx, 'Triggering': idx, 'days': idx
+        header_found = False
+        
+        for row in sheet.iter_rows():
+            # Convert row cells to values for logic
+            values = [str(c.value).strip() if c.value is not None else "" for c in row]
             
-            triggers_raw = str(row.get('Triggering task', ''))
-            days_raw = str(row.get('days', ''))
+            # 0. Check for Section in Column A (Index 0) ALWAYS
+            # Assumption: Section headers are in the first column and are BOLD.
+            cell_A = row[0]
+            val_A = str(cell_A.value).strip() if cell_A.value else ""
             
-            triggers = []
-            if triggers_raw and triggers_raw.lower() != 'nan':
-                triggers = [t.strip() for t in triggers_raw.split('|') if t.strip()]
+            # If Col A is Bold and has text, it's a Section
+            if val_A and cell_A.font and cell_A.font.b:
+                 if val_A.lower() != "responsible":
+                     current_section = val_A
+                     # print(f"Section Detected: {current_section}")
+
+            # 1. Detect Header Row
+            if not header_found:
+                if 'Task' in values and 'Triggering task' in values:
+                    for idx, val in enumerate(values):
+                        if val == 'Task': col_map['Task'] = idx
+                        if val == 'Triggering task': col_map['Triggering'] = idx
+                        if val == 'days': col_map['days'] = idx
+                    header_found = True
+                    # The detections are 0-indexed relative to row values.
+                    # row[0] is Column A.
+                continue 
+
+            # 2. Logic for Data Rows
+            if not col_map: continue
             
+            # (Section check moved to top)
+            
+            # Process Task
+            def get_cell(key):
+                idx = col_map.get(key)
+                if idx is None or idx >= len(row): return None
+                return row[idx]
+
+            task_cell = get_cell('Task')
+            if not task_cell or not task_cell.value: continue
+            
+            task_name = str(task_cell.value).strip()
+            if not task_name or task_name.lower() == 'nan': continue
+            if task_name in ['Task', 'Triggering task']: continue
+            
+            # It's a Task
+            trig_cell = get_cell('Triggering')
+            days_cell = get_cell('days')
+            
+            triggers_raw = str(trig_cell.value).strip() if trig_cell and trig_cell.value else ""
+            days_raw = str(days_cell.value).strip() if days_cell and days_cell.value else ""
+            
+            triggers = [t.strip() for t in triggers_raw.split('|') if t.strip()]
             lags = []
-            if days_raw and days_raw.lower() != 'nan':
-                 try:
-                    lags = [int(float(d.strip())) for d in days_raw.split('|') if d.strip()]
-                 except: pass
-            
-            # Correcting the parsing logic to match original:
-            # The original code treats the 'Task' column as the DEPENDENT task (Successor)
-            # And 'Triggering task' as the PREDECESSOR.
-            # "Triggering task" triggers "Task".
-            
+            if days_raw:
+                try:
+                   lags = [int(float(d.strip())) for d in days_raw.split('|') if d.strip()]
+                except: pass
+                
             tasks_data.append({
-                "name": str(task_name).strip(),
-                "duration": 0, # Default to 0 (Same Day)
+                "name": task_name,
+                "duration": 0, 
                 "triggering_tasks": triggers,
-                "lag_days": lags
+                "lag_days": lags,
+                "section": current_section
             })
             
         return {"tasks": tasks_data}
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error parsing Excel: {str(e)}")
 
 @app.post("/schedule", response_model=List[ScheduledTask])
@@ -164,7 +209,7 @@ async def schedule_tasks(request: ScheduleRequest):
     
     # Load tasks
     for t_model in request.tasks:
-        scheduler.add_task(t_model.name)
+        scheduler.add_task(t_model.name, section=t_model.section)
         # Note: Original code set duration based on 'days' column of the *Triggering Task* row context? 
         # Actually checking original code:
         # for i, suc_name in enumerate(triggers):
@@ -223,6 +268,9 @@ async def schedule_tasks(request: ScheduleRequest):
             
             scheduler.add_dependency(t.name, trig, 0)
 
+    # Propagate sections to orphans
+    scheduler.inherit_missing_sections()
+
     scheduler.calculate_dates()
     return scheduler.get_scheduled_tasks()
 
@@ -274,6 +322,30 @@ async def sync_asana(request: SyncRequest):
                 linked_count += 1
                 time.sleep(0.3) # Prevent Rate Limiting
                 
+    # 3. Handle Sections
+    print("Handling Sections...")
+    gid_map = manager.task_registry # Name -> GID
+    
+    try:
+        for task in request.tasks:
+                # Debug Print
+                try:
+                    print(f"Task: {task.name} | Section: {task.section} | GID found: {task.name in gid_map}")
+                except: 
+                    pass # Ignore print errors
+                
+                if task.section and task.name in gid_map:
+                    try:
+                        sec_gid = manager.get_or_create_section(task.section)
+                        if sec_gid:
+                            manager.move_task_to_section(gid_map[task.name], sec_gid)
+                    except Exception as e:
+                        print(f"Failed to move {task.name} to section {task.section}: {e}")
+    except Exception as ie:
+        print(f"CRITICAL ERROR in Section Loop: {ie}")
+        import traceback
+        traceback.print_exc()
+
     return {"status": "success", "created": created_count, "linked": linked_count}
 
 @app.post("/update-task-date")
