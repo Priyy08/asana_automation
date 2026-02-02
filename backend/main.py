@@ -129,7 +129,7 @@ async def parse_excel(file: UploadFile = File(...)):
         col_map = {} # 'Task': idx, 'Triggering': idx, 'days': idx
         header_found = False
         
-        for row in sheet.iter_rows():
+        for i, row in enumerate(sheet.iter_rows(min_row=1, values_only=False), start=1):
             # Convert row cells to values for logic
             values = [str(c.value).strip() if c.value is not None else "" for c in row]
             
@@ -146,20 +146,19 @@ async def parse_excel(file: UploadFile = File(...)):
 
             # 1. Detect Header Row
             if not header_found:
+                # Debug: Print headers found in potential row
+                # print(f"Checking row for headers: {values}")
                 if 'Task' in values and 'Triggering task' in values:
                     for idx, val in enumerate(values):
                         if val == 'Task': col_map['Task'] = idx
                         if val == 'Triggering task': col_map['Triggering'] = idx
                         if val == 'days': col_map['days'] = idx
                     header_found = True
-                    # The detections are 0-indexed relative to row values.
-                    # row[0] is Column A.
+                    print(f"Headers Found! Map: {col_map}")
                 continue 
 
             # 2. Logic for Data Rows
             if not col_map: continue
-            
-            # (Section check moved to top)
             
             # Process Task
             def get_cell(key):
@@ -181,6 +180,9 @@ async def parse_excel(file: UploadFile = File(...)):
             triggers_raw = str(trig_cell.value).strip() if trig_cell and trig_cell.value else ""
             days_raw = str(days_cell.value).strip() if days_cell and days_cell.value else ""
             
+            if triggers_raw or days_raw:
+                 print(f"Task: {task_name} | Triggers: '{triggers_raw}' | Days: '{days_raw}'")
+            
             triggers = [t.strip() for t in triggers_raw.split('|') if t.strip()]
             lags = []
             if days_raw:
@@ -188,7 +190,11 @@ async def parse_excel(file: UploadFile = File(...)):
                    lags = [int(float(d.strip())) for d in days_raw.split('|') if d.strip()]
                 except: pass
                 
+            # Use Row Index as Unique ID
+            unique_id = f"row_{i}"
+            
             tasks_data.append({
+                "id": unique_id,
                 "name": task_name,
                 "duration": 0, 
                 "triggering_tasks": triggers,
@@ -203,70 +209,42 @@ async def parse_excel(file: UploadFile = File(...)):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error parsing Excel: {str(e)}")
 
-@app.post("/schedule", response_model=List[ScheduledTask])
-async def schedule_tasks(request: ScheduleRequest):
+@app.post("/schedule")
+def schedule_tasks(request: ScheduleRequest):
     scheduler = Scheduler()
     
-    # Load tasks
-    for t_model in request.tasks:
-        scheduler.add_task(t_model.name, section=t_model.section)
-        # Note: Original code set duration based on 'days' column of the *Triggering Task* row context? 
-        # Actually checking original code:
-        # for i, suc_name in enumerate(triggers):
-            # duration = lags[i]
-            # scheduler.add_task(suc_name) ... duration ...
-        # It seems the 'days' column in the Excel was associated with the triggering tasks list?
-        # Let's stick to a simplified interpretation or the one that matches the original exactly if possible.
-        # Original:
-        # task_name = row['Task'] (This is the one being defined)
-        # triggers = row['Triggering task']
-        # days = row['days']
-        # "scheduler.add_task(suc_name)" -> wait, 'suc_name' was from triggers loop?
-        # "scheduler.add_dependency(task_name, suc_name, 0)" -> task_name depends on suc_name?
-        # No: add_dependency(predecessor, successor, lag).
-        # Original: add_dependency(task_name, suc_name, 0).
-        # This means task_name (Row Task) IS THE PREDECESSOR of suc_name (Triggering Task??)
-        # "Triggering task" name suggests it triggers the current task...
-        # But `add_dependency(task_name, suc_name)` means task_name -> suc_name.
-        # If 'Triggering task' means "Tasks that this task triggers", then yes.
-        # But usually 'Triggering task' column implies "Prerequisites".
-        # Let's look at: 
-        # "scheduler.add_task(suc_name)" inside the trigger loop.
-        # "scheduler.tasks[suc_name]['duration'] = duration"
-        # So the duration applies to the tasks in the 'Triggering task' column?
-        # This is a bit odd naming in the excel, but we must follow the logic.
+    # 1. Add all tasks (First Pass)
+    for t in request.tasks:
+        scheduler.add_task(t.id, t.name, section=t.section)
         
-        # Current Logic in endpoint:
-        # We receive a list of tasks with their own properties.
-        # We need to construct the graph.
+    # 2. Add Dependencies (Second Pass)
+    for t in request.tasks:
+        # scheduler.tasks is accessed by ID now
+        if t.id in scheduler.tasks:
+            # Only apply duration from Row Model if it's explicitly set (non-zero)
+            # This prevents overwriting a duration that was set by a Predecessor (via 'Days' column)
+            if t.duration > 0:
+                scheduler.tasks[t.id]['duration'] = t.duration
         
-        pass
+        if t.id in scheduler.tasks:
+            # Row Task Duration defaults to 0 (or 1?)
+            # User implies Row Task blocks others. Usually blocking task takes time.
+            # But the 'days' column is aligned with the 'Triggering Task' list.
+            # So 'days' applies to the *Dependent Task*.
+            pass
 
-    # Re-evaluating the Excel Parsing to match generic logic:
-    # Let's assume the /schedule endpoint receives a clean list of "Task items"
-    # And we build the graph.
-    
-    for t in request.tasks:
-        scheduler.add_task(t.name)
-        # If the input model has duration, set it.
-        scheduler.tasks[t.name]['duration'] = t.duration
-        
-    # Add dependencies
-    for t in request.tasks:
-        # t.name is the "Row Task"
-        # t.triggering_tasks are the ones listed in "Triggering task" column.
-        # In original code: 
-        # for suc_name in triggers:
-        #    scheduler.add_dependency(task_name, suc_name)
-        # So Row Task -> Triggering Task (Row Task is Predecessor)
-        
-        for i, trig in enumerate(t.triggering_tasks):
-            scheduler.add_task(trig) # Ensure it exists
-            # Duration logic from original:
+        for i, trig_name in enumerate(t.triggering_tasks):
+            # "Days" column value matches index of Triggering Task
+            successor_duration = 1
             if i < len(t.lag_days):
-                scheduler.tasks[trig]['duration'] = t.lag_days[i]
+                successor_duration = t.lag_days[i]
             
-            scheduler.add_dependency(t.name, trig, 0)
+            # Resolve Dependency: Row Task (t.id) IS PREDECESSOR of Trigger Name (Successor)
+            succ_id = scheduler.resolve_successor(predecessor_id=t.id, successor_name=trig_name, lag_days=0)
+            
+            # Set Duration of the Successor (The Dependent/Triggering Task)
+            if succ_id and succ_id in scheduler.tasks:
+                scheduler.tasks[succ_id]['duration'] = successor_duration
 
     # Propagate sections to orphans
     scheduler.inherit_missing_sections()
@@ -275,48 +253,45 @@ async def schedule_tasks(request: ScheduleRequest):
     return scheduler.get_scheduled_tasks()
 
 @app.post("/sync-asana")
-async def sync_asana(request: SyncRequest):
+def sync_asana(request: SyncRequest):
     manager = AsanaManager(request.config.pat, request.config.project_gid)
     
-    # 1. Create Tasks
-    created_count = 0
-    for t in request.tasks:
-        gid = manager.create_task_with_dates(t.name, t.start_date, t.end_date)
-        if gid:
-            manager.task_registry[t.name] = gid
-            created_count += 1
-        time.sleep(0.2) # Prevent Rate Limiting
-    
-    # Save Baseline to DB
-    # We need to construct the list of tasks with GIDs and Dates
-    # The 'request.tasks' has names and initial dates. 'manager.task_registry' has GIDs.
-    
+    # 1. Create Tasks (Baseline)
+    print("Creating Tasks...")
     baseline_tasks = []
-    for t in request.tasks:
-        gid = manager.task_registry.get(t.name)
+    
+    created_count = 0
+    
+    for task in request.tasks:
+        # Create task in Asana (Asana allows duplicate names)
+        gid = manager.create_task_with_dates(task.name, task.start_date, task.end_date)
         if gid:
+            # Map Scheduler ID to Asana GID
+            manager.task_registry[task.id] = gid
+            created_count += 1
+            
             baseline_tasks.append({
                 'gid': gid,
-                'name': t.name,
-                'start_on': t.start_date,
-                'due_on': t.end_date
+                'name': task.name,
+                'start_on': task.start_date,
+                'due_on': task.end_date
             })
     
     try:
-        await run_in_threadpool(save_baseline, baseline_tasks)
+        run_in_threadpool(save_baseline, baseline_tasks)
     except Exception as e:
         print(f"Failed to save baseline: {e}")
 
     # 2. Link Dependencies
     linked_count = 0
     for t in request.tasks:
-        # ScheduledTask has 'dependencies' field (strings of names)
-        # In our scheduler logic, these are PREDECESSORS.
-        suc_gid = manager.task_registry.get(t.name)
+        # t.id -> Successor GID
+        suc_gid = manager.task_registry.get(t.id)
         if not suc_gid: continue
         
-        for pred_name in t.dependencies:
-            pred_gid = manager.task_registry.get(pred_name)
+        # t.dependencies is list of Predecessor IDs
+        for pred_id in t.dependencies:
+            pred_gid = manager.task_registry.get(pred_id)
             if pred_gid:
                 manager.link_dependency(suc_gid, pred_gid)
                 linked_count += 1
@@ -324,21 +299,15 @@ async def sync_asana(request: SyncRequest):
                 
     # 3. Handle Sections
     print("Handling Sections...")
-    gid_map = manager.task_registry # Name -> GID
+    gid_map = manager.task_registry # ID -> GID
     
     try:
         for task in request.tasks:
-                # Debug Print
-                try:
-                    print(f"Task: {task.name} | Section: {task.section} | GID found: {task.name in gid_map}")
-                except: 
-                    pass # Ignore print errors
-                
-                if task.section and task.name in gid_map:
+                if task.section and task.id in gid_map:
                     try:
                         sec_gid = manager.get_or_create_section(task.section)
                         if sec_gid:
-                            manager.move_task_to_section(gid_map[task.name], sec_gid)
+                            manager.move_task_to_section(gid_map[task.id], sec_gid)
                     except Exception as e:
                         print(f"Failed to move {task.name} to section {task.section}: {e}")
     except Exception as ie:

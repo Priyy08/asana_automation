@@ -3,6 +3,7 @@ from typing import List, Optional
 from datetime import datetime
 
 class TaskModel(BaseModel):
+    id: str # Unique ID (e.g. Row Index)
     name: str
     duration: int = 1
     triggering_tasks: List[str] = []
@@ -17,11 +18,13 @@ class AsanaConfig(BaseModel):
     project_gid: str
 
 class ScheduledTask(BaseModel):
+    id: str # Unique ID
     name: str
     start_date: str
     end_date: str
     duration: int
-    dependencies: List[str]
+    dependencies: List[str] # List of Predecessor IDs
+    dependency_names: List[str] = [] # For display/debug
     section: Optional[str] = None
 
 class SyncRequest(BaseModel):
