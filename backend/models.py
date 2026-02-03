@@ -9,6 +9,8 @@ class TaskModel(BaseModel):
     triggering_tasks: List[str] = []
     lag_days: List[int] = []
     section: Optional[str] = None
+    team: Optional[str] = None
+    responsible: Optional[str] = None
 
 class ScheduleRequest(BaseModel):
     tasks: List[TaskModel]
@@ -26,6 +28,8 @@ class ScheduledTask(BaseModel):
     dependencies: List[str] # List of Predecessor IDs
     dependency_names: List[str] = [] # For display/debug
     section: Optional[str] = None
+    team: Optional[str] = None
+    responsible: Optional[str] = None
 
 class SyncRequest(BaseModel):
     config: AsanaConfig

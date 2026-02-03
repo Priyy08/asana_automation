@@ -153,6 +153,8 @@ async def parse_excel(file: UploadFile = File(...)):
                         if val == 'Task': col_map['Task'] = idx
                         if val == 'Triggering task': col_map['Triggering'] = idx
                         if val == 'days': col_map['days'] = idx
+                        if val.lower() == 'team': col_map['Team'] = idx
+                        if val.lower() == 'responsible': col_map['Responsible'] = idx
                     header_found = True
                     print(f"Headers Found! Map: {col_map}")
                 continue 
@@ -176,12 +178,17 @@ async def parse_excel(file: UploadFile = File(...)):
             # It's a Task
             trig_cell = get_cell('Triggering')
             days_cell = get_cell('days')
+            team_cell = get_cell('Team')
+            resp_cell = get_cell('Responsible')
             
             triggers_raw = str(trig_cell.value).strip() if trig_cell and trig_cell.value else ""
             days_raw = str(days_cell.value).strip() if days_cell and days_cell.value else ""
+            team_val = str(team_cell.value).strip() if team_cell and team_cell.value else ""
+            resp_val = str(resp_cell.value).strip() if resp_cell and resp_cell.value else ""
             
             if triggers_raw or days_raw:
-                 print(f"Task: {task_name} | Triggers: '{triggers_raw}' | Days: '{days_raw}'")
+                 # print(f"Task: {task_name} | Triggers: '{triggers_raw}' | Days: '{days_raw}'")
+                 pass
             
             triggers = [t.strip() for t in triggers_raw.split('|') if t.strip()]
             lags = []
@@ -199,7 +206,9 @@ async def parse_excel(file: UploadFile = File(...)):
                 "duration": 0, 
                 "triggering_tasks": triggers,
                 "lag_days": lags,
-                "section": current_section
+                "section": current_section,
+                "team": team_val,
+                "responsible": resp_val
             })
             
         return {"tasks": tasks_data}
@@ -215,7 +224,7 @@ def schedule_tasks(request: ScheduleRequest):
     
     # 1. Add all tasks (First Pass)
     for t in request.tasks:
-        scheduler.add_task(t.id, t.name, section=t.section)
+        scheduler.add_task(t.id, t.name, section=t.section, team=t.team, responsible=t.responsible)
         
     # 2. Add Dependencies (Second Pass)
     for t in request.tasks:
@@ -256,15 +265,53 @@ def schedule_tasks(request: ScheduleRequest):
 def sync_asana(request: SyncRequest):
     manager = AsanaManager(request.config.pat, request.config.project_gid)
     
-    # 1. Create Tasks (Baseline)
+    # 1. Setup Custom Fields & Fetch Users
+    print("Setting up Custom Fields & Fetching Users...")
+    ws_gid = manager.get_workspace_gid()
+    team_gid = manager.ensure_text_custom_field("Team", ws_gid)
+    resp_gid = manager.ensure_text_custom_field("Responsible", ws_gid)
+    
+    # Fetch Users for Assignment
+    users_map = manager.fetch_workspace_users(ws_gid)
+    print(f"Fetched {len(users_map)} users for assignment mapping.")
+    
+    # 2. Create Tasks (Baseline)
     print("Creating Tasks...")
     baseline_tasks = []
     
     created_count = 0
     
     for task in request.tasks:
+        # Construct Description (Keep checks just in case)
+        notes_parts = []
+        if task.team: notes_parts.append(f"Team: {task.team}")
+        if task.responsible: notes_parts.append(f"Responsible: {task.responsible}")
+        notes_str = "\n".join(notes_parts)
+
+        # Prepare Custom Fields
+        c_fields = {}
+        if team_gid and task.team: c_fields[team_gid] = task.team
+        if resp_gid and task.responsible: c_fields[resp_gid] = task.responsible
+
+        # Resolve Assignee
+        assignee_gid = None
+        # Try matching 'Responsible' first, then 'Team'
+        # Check against name or email in users_map
+        if task.responsible:
+             assignee_gid = users_map.get(task.responsible.lower())
+        
+        if not assignee_gid and task.team:
+             assignee_gid = users_map.get(task.team.lower())
+
         # Create task in Asana (Asana allows duplicate names)
-        gid = manager.create_task_with_dates(task.name, task.start_date, task.end_date)
+        gid = manager.create_task_with_dates(
+            task.name, 
+            task.start_date, 
+            task.end_date, 
+            notes=notes_str,
+            custom_fields=c_fields,
+            assignee=assignee_gid
+        )
         if gid:
             # Map Scheduler ID to Asana GID
             manager.task_registry[task.id] = gid
