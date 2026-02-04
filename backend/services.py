@@ -226,9 +226,98 @@ class AsanaManager:
             gid = result['data']['gid'] if 'data' in result else result['gid']
             return gid
         except ApiException as e:
-            print(f"Error creating task {name}: {e}")
+            with open("CRITICAL_ERROR.log", "w") as f:
+                f.write(f"Error creating task {name}: Status={e.status}, Body={e.body}")
+            print(f"Error creating task {name}: Status={e.status}, Body={e.body}")
             return None
 
+
+
+    def find_custom_field(self, name):
+        """Finds a custom field by name and returns (gid, type)."""
+        if name in self.custom_field_cache: 
+             val = self.custom_field_cache[name]
+             if isinstance(val, tuple): return val
+             return val, 'text'
+
+        try:
+            settings = self.custom_fields_api.get_custom_field_settings_for_project(self.project_gid, {})
+            for s in settings:
+                cf = s.get('custom_field') if isinstance(s, dict) else getattr(s, 'custom_field', None)
+                if cf:
+                    c_name = cf.get('name') if isinstance(cf, dict) else getattr(cf, 'name', None)
+                    if c_name == name:
+                        c_gid = cf.get('gid') if isinstance(cf, dict) else getattr(cf, 'gid', None)
+                        c_type = cf.get('type') if isinstance(cf, dict) else getattr(cf, 'type', 'text')
+                        
+                        self.custom_field_cache[name] = (c_gid, c_type)
+                        return c_gid, c_type
+            
+            print(f"[AsanaManager] Custom Field '{name}' not found in project.")
+            return None, None
+        except Exception as e:
+            print(f"[AsanaManager] Error finding field '{name}': {e}")
+            return None, None
+
+    
+    def ensure_date_custom_field(self, name, workspace_gid):
+        if not workspace_gid: return None, None
+        if name in self.custom_field_cache: 
+             val = self.custom_field_cache[name]
+             if isinstance(val, tuple): return val
+             return val, 'date'
+
+        # 1. Check Workspace (Reuse existing)
+        try:
+            iterator = self.custom_fields_api.get_custom_fields_for_workspace(workspace_gid, {'opt_fields': 'name,type,gid'})
+            for cf in iterator:
+                c_name = cf.get('name') if isinstance(cf, dict) else getattr(cf, 'name', None)
+                if c_name == name:
+                    c_gid = cf.get('gid') if isinstance(cf, dict) else getattr(cf, 'gid', None)
+                    c_type = cf.get('type') if isinstance(cf, dict) else getattr(cf, 'type', 'text')
+                    
+                    print(f"[AsanaManager] Found existing field '{name}' in workspace ({c_gid}). Adding to project...")
+                    self.add_custom_field_to_project(c_gid)
+                    self.custom_field_cache[name] = (c_gid, c_type)
+                    return c_gid, c_type
+        except Exception as e:
+            print(f"[AsanaManager] Error scanning workspace fields: {e}")
+
+        # 2. Create if not found
+        try:
+            body = {
+                "data": {
+                    "name": name,
+                    "type": "date",
+                    "workspace": workspace_gid,
+                    "format": "custom"
+                }
+            }
+            res = self.custom_fields_api.create_custom_field(body, {})
+            if isinstance(res, dict): res = res.get('data', res)
+            elif hasattr(res, 'data'): res = res.data
+            gid = res.get('gid') if isinstance(res, dict) else getattr(res, 'gid', None)
+            
+            if gid:
+                 self.add_custom_field_to_project(gid)
+                 self.custom_field_cache[name] = (gid, 'date')
+                 return gid, 'date'
+        except ApiException as e:
+            print(f"[AsanaManager] Error creating field '{name}': {e}")
+            return None, None
+
+    def add_custom_field_to_project(self, field_gid):
+        """Adds a custom field to the project. robustly."""
+        try:
+            # Correct API signature: pass body directly
+            body = {"data": {"custom_field": field_gid}}
+            # Use kwargs to avoid positional errors, include required opts
+            self.projects_api.add_custom_field_setting_for_project(project_gid=self.project_gid, body=body, opts={})
+            print(f"[AsanaManager] Successfully added field {field_gid} to project.")
+        except Exception as e:
+            # Ignore 409 (Already added) or similar errors where field is present
+            print(f"[AsanaManager] Warning: Failed to add field {field_gid}: {e}")
+            return None, None
 
     def ensure_text_custom_field(self, name, workspace_gid):
         if not workspace_gid: return None
@@ -268,13 +357,6 @@ class AsanaManager:
         except ApiException as e:
             print(f"[AsanaManager] Error creating/finding field '{name}': {e}")
             return None
-
-    def add_custom_field_to_project(self, field_gid):
-        try:
-            body = {"data": {"custom_field": field_gid}}
-            self.custom_fields_api.add_custom_field_setting_for_project(self.project_gid, {'body': body})
-        except Exception as e:
-            print(f"Failed to add field to project: {e}")
 
     def get_or_create_section(self, section_name):
         section_name = section_name.strip()
@@ -361,7 +443,9 @@ class AsanaManager:
             gid = result['data']['gid'] if 'data' in result else result['gid']
             return gid
         except ApiException as e:
-            print(f"Error creating task {name}: {e}")
+            with open("CRITICAL_ERROR.log", "w") as f:
+                f.write(f"Error creating task {name}: Status={e.status}, Body={e.body}")
+            print(f"Error creating task {name}: Status={e.status}, Body={e.body}")
             return None
 
     def link_dependency(self, dependent_gid, predecessor_gid):

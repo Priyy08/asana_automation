@@ -3,3 +3,28 @@ __pycache__/
 .env
 venv/
 .vscode/
+
+# Debug and Temporary Scripts
+debug_*.py
+debug_*.txt
+patch_*.py
+scan_*.py
+restore_*.py
+read_*.py
+check_*.py
+inspect_*.py
+find_*.py
+purge_*.py
+list_*.py
+test_*.py
+get_ws_id.py
+
+# Logs
+*.log
+error_summary.txt
+duplicates.txt
+sections_list.txt
+style_report.txt
+scan_results.txt
+sig.txt
+path_debug.txt

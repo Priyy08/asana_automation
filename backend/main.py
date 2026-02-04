@@ -271,6 +271,10 @@ def sync_asana(request: SyncRequest):
     team_gid = manager.ensure_text_custom_field("Team", ws_gid)
     resp_gid = manager.ensure_text_custom_field("Responsible", ws_gid)
     
+    # Check for User-requested "Start Date" and "End_date" (Create if missing)
+    sd_gid, sd_type = manager.ensure_date_custom_field("Start Date", ws_gid)
+    ed_gid, ed_type = manager.ensure_date_custom_field("End_date", ws_gid)
+    
     # Fetch Users for Assignment
     users_map = manager.fetch_workspace_users(ws_gid)
     print(f"Fetched {len(users_map)} users for assignment mapping.")
@@ -292,6 +296,20 @@ def sync_asana(request: SyncRequest):
         c_fields = {}
         if team_gid and task.team: c_fields[team_gid] = task.team
         if resp_gid and task.responsible: c_fields[resp_gid] = task.responsible
+        
+        # Populate Start Date
+        if sd_gid and task.start_date:
+            if sd_type == 'date':
+                c_fields[sd_gid] = {'date': task.start_date}
+            else:
+                c_fields[sd_gid] = task.start_date
+                
+        # Populate End_date
+        if ed_gid and task.end_date:
+            if ed_type == 'date':
+                 c_fields[ed_gid] = {'date': task.end_date}
+            else:
+                 c_fields[ed_gid] = task.end_date
 
         # Resolve Assignee
         assignee_gid = None
